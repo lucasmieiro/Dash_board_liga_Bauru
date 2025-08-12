@@ -1,8 +1,8 @@
-# app.py — Mini terminal financeiro (USD/BRL, IBOV, SPY, BTC) + News + Agenda + Heatmap B3
+# app.py — Mini terminal financeiro (USD/BRL, Selic, IBOV, SPY, BTC) + News + Agenda + Heatmap B3
 # Auto-refresh a cada 25 minutos. Com "🔧 Debug IBOV" na sidebar.
 
 import os, time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dateutil import tz
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
 
@@ -194,6 +194,27 @@ def btc_series():
     except Exception: pass
     return pd.DataFrame(), None
 
+# ========== BCB / SGS — Selic (Meta COPOM, % a.a., série 432) ==========
+@st.cache_data(ttl=6 * 3600)  # 6 horas; Selic muda pouco
+def bcb_selic_target_series(years=10):
+    """Série 432: Meta Selic (% a.a.), diária, últimos 'years' anos (limite do SGS é 10 anos por chamada)."""
+    end = date.today()
+    start = end - timedelta(days=365 * years)
+    url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados"
+    params = {"formato": "json", "dataInicial": start.strftime("%d/%m/%Y"), "dataFinal": end.strftime("%d/%m/%Y")}
+    try:
+        r = REQ.get(url, params=params, timeout=TIMEOUT)
+        data = r.json()
+        df = pd.DataFrame(data)
+        if df.empty or "data" not in df or "valor" not in df:
+            return pd.DataFrame()
+        df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
+        df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
+        df = df.rename(columns={"data": "dt", "valor": "selic"}).dropna()
+        return df.set_index("dt").sort_index()
+    except Exception:
+        return pd.DataFrame()
+
 # ========== IBOV — Yahoo Chart v8 + yfinance + Stooq (.com/.pl) + brapi diário + proxy BOVA11 ==========
 def _yahoo_chart(symbol: str, range_: str, interval: str):
     """Yahoo Chart v8 (query1 e query2) com region/lang BR."""
@@ -233,7 +254,7 @@ def _stooq_ibov_daily():
                 continue
             from io import StringIO
             df = pd.read_csv(StringIO(r.text))
-            if "Date" in df and "Close" in df:
+            if "Date" in df.columns and "Close" in df.columns:
                 df["Date"] = pd.to_datetime(df["Date"])
                 df = df.rename(columns={"Date":"dt","Close":"close"}).dropna()
                 df = df[["dt","close"]].set_index("dt").sort_index()
@@ -267,11 +288,9 @@ def _brapi_daily_series(ticker: str):
             excerpt = f"EXC json: {e}"
         yield None, label, {"status":status,"url":safe_url,"note":str(excerpt)[:120]}
 
-def _normalize_to_level(proxy_df: pd.DataFrame, target_last: float | None):
+def _normalize_to_level(proxy_df, target_last):
     """Normaliza a série proxy (BOVA11) para o nível do alvo (se disponível)."""
-    if proxy_df is None or proxy_df.empty:
-        return proxy_df
-    if target_last is None:
+    if proxy_df is None or proxy_df.empty or target_last is None:
         return proxy_df
     pl = last_price(proxy_df)
     if pl is None or pl == 0:
@@ -341,7 +360,7 @@ def _ibov_series_impl(debug=False):
                      "status":meta.get("status"),"note":meta.get("note"),"url":meta.get("url")})
         if ok: return result_df, label, logs
 
-    # 5) Proxy BOVA11 — tenta achar qualquer coisa e normaliza ao último nível conhecido do Stooq (se houver)
+    # 5) Proxy BOVA11 — tenta achar algo e normaliza ao nível diário do Stooq (se houver)
     stooq_df, _, _, _ = _stooq_ibov_daily()
     stooq_last = last_price(stooq_df) if stooq_df is not None and not stooq_df.empty else None
 
@@ -368,7 +387,7 @@ def _ibov_series_impl(debug=False):
             if status == 200 and r and r.text:
                 from io import StringIO
                 pdf = pd.read_csv(StringIO(r.text))
-                if "Date" in pdf and "Close" in pdf:
+                if "Date" in pdf.columns and "Close" in pdf.columns:
                     pdf["Date"] = pd.to_datetime(pdf["Date"])
                     pdf = pdf.rename(columns={"Date":"dt","Close":"close"}).dropna()[["dt","close"]].set_index("dt").sort_index()
                     ok = not pdf.empty
@@ -536,8 +555,9 @@ with colL:
             unsafe_allow_html=True,
         )
 
-# Dólar + Agenda + Heatmap
+# Dólar + Selic + Agenda + Heatmap
 with colC:
+    # USD/BRL
     fx_df, fx_src = av_fx_intraday("USD","BRL","5min")
     title = "USD/BRL (5m, intraday)" if fx_src=="intraday" else ("USD/BRL (últimos dias)" if fx_src=="daily" else "USD/BRL")
     st.markdown(f"### 💵 {title}")
@@ -547,6 +567,16 @@ with colC:
     else:
         st.warning("Sem dados do USD/BRL (limite AV ou sem chave).")
 
+    # Selic (BCB/SGS 432)
+    st.markdown("### 📉 Taxa Selic (Meta COPOM, % a.a.)")
+    selic_df = bcb_selic_target_series(years=10)
+    if not selic_df.empty:
+        st.plotly_chart(line_chart(selic_df, "", field="selic"), use_container_width=True)
+        st.caption(f"Último: {selic_df['selic'].iloc[-1]:.2f}% • Fonte: BCB/SGS (série 432).")
+    else:
+        st.warning("Não foi possível obter a Selic agora (SGS).")
+
+    # Agenda
     st.markdown("### 📈 Agenda rápida")
     cal = get_calendar_today()
     if not cal.empty:
@@ -554,6 +584,7 @@ with colC:
     else:
         st.caption("Sem eventos relevantes agora (ou limite da API).")
 
+    # Heatmap
     st.markdown("### 🇧🇷 Heatmap Setorial — B3")
     if FMP_KEY:
         df_b3 = build_b3_heatmap_df()
@@ -622,7 +653,6 @@ local_tz = tz.tzlocal()
 now_local = datetime.now(local_tz).strftime("%d/%m/%Y %H:%M")
 st.caption(
     f"Atualizado em {now_local} • Auto-refresh: 25 min • Dados: Alpha Vantage (USD/BRL, SPY, BTC c/ fallback Binance), "
-    f"Yahoo Chart / yfinance / Stooq (.com/.pl) / brapi (diário 1mo/3mo) / proxy BOVA11 (normalizado) — IBOV, "
+    f"BCB/SGS (Selic série 432), Yahoo Chart / yfinance / Stooq (.com/.pl) / brapi (diário 1mo/3mo) / proxy BOVA11 (IBOV), "
     f"FMP (Heatmap), TradingEconomics (agenda), NewsAPI + RSS (manchetes)."
 )
-
