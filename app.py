@@ -1,10 +1,3 @@
-import os, shutil, textwrap, pathlib, zipfile
-
-root = pathlib.Path("/mnt/data/updated_streamlit_app")
-if root.exists():
-    shutil.rmtree(root)
-(root / ".streamlit").mkdir(parents=True, exist_ok=True)
-
 import os
 import sys
 import time
@@ -47,15 +40,10 @@ def maintenance_guard():
     st.stop()
 
 def safe_combo(period: str, interval: str):
-    """
-    Normalize invalid period/interval combinations for Yahoo Finance.
-    Intraday intervals only support ~30-60 days of history.
-    """
+    """Normalize invalid period/interval combinations for Yahoo Finance."""
     intraday = {"1m","2m","5m","15m","30m","60m","90m"}
     if interval in intraday and period not in {"7d","14d","1mo","30d","2mo","3mo"}:
-        # clamp
         period = "30d"
-    # Example rule: 15m is often limited more strictly
     if interval == "15m" and period not in {"14d","30d"}:
         interval = "30m"
     return period, interval
@@ -82,7 +70,6 @@ def yf_download(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.Da
         if df is None or df.empty:
             return pd.DataFrame()
         df = _strip_tz(df)
-        # Unify column names
         if "Adj Close" in df.columns:
             df = df.rename(columns={"Adj Close": "Close"})
         return df
@@ -91,26 +78,14 @@ def yf_download(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.Da
 
 @st.cache_data(ttl=30*60, show_spinner=False)
 def get_btc(period="6mo", interval="1d") -> pd.DataFrame:
-    """
-    Robust BTC fetch with multi-provider fallbacks:
-      1) yfinance daily
-      2) yfinance intraday (short window)
-      3) Coingecko daily
-      4) AlphaVantage DIGITAL_CURRENCY_DAILY (needs key)
-    Returns DataFrame with 'Close' price indexed by datetime.
-    """
-    # 1) yfinance daily first
     df = yf_download("BTC-USD", period="6mo", interval="1d")
     if not df.empty and len(df) >= 10:
         return df[["Close"]].copy()
 
-    # 2) yfinance intraday (short window)
     df = yf_download("BTC-USD", period="30d", interval="30m")
     if not df.empty and len(df) >= 10:
-        # Resample to 1h or keep as-is; here keep as-is for detail
         return df[["Close"]].copy()
 
-    # 3) Coingecko
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
@@ -122,12 +97,11 @@ def get_btc(period="6mo", interval="1d") -> pd.DataFrame:
         if arr:
             df = pd.DataFrame(arr, columns=["ts","Close"])
             df["Date"] = pd.to_datetime(df["ts"], unit="ms")
-            df = df.set_index("Date")[["Close"]]
+            df = df.set_index("Date")[ ["Close"] ]
             return df
     except Exception:
         pass
 
-    # 4) AlphaVantage daily (key required)
     av_key = os.environ.get("ALPHAVANTAGE_KEY")
     if av_key:
         try:
@@ -147,7 +121,6 @@ def get_btc(period="6mo", interval="1d") -> pd.DataFrame:
                 df = pd.DataFrame.from_dict(ts, orient="index")
                 df.index = pd.to_datetime(df.index)
                 df = df.sort_index()
-                # find USD close column
                 col = [c for c in df.columns if "close" in c.lower() and "(usd)" in c.lower()]
                 if col:
                     out = df.rename(columns={col[0]: "Close"})[["Close"]].astype(float)
@@ -159,12 +132,10 @@ def get_btc(period="6mo", interval="1d") -> pd.DataFrame:
 
 @st.cache_data(ttl=30*60, show_spinner=False)
 def get_usdbrl(period="6mo", interval="1d") -> pd.DataFrame:
-    # yfinance (spot) USDBRL
     df = yf_download("USDBRL=X", period=period, interval=interval)
     if not df.empty and len(df) >= 5:
         return df[["Close"]].copy()
 
-    # AlphaVantage FX_DAILY (requires key, but sometimes limits are strict)
     av_key = os.environ.get("ALPHAVANTAGE_KEY")
     if av_key:
         try:
@@ -190,7 +161,6 @@ def get_usdbrl(period="6mo", interval="1d") -> pd.DataFrame:
         except Exception:
             pass
 
-    # exchangerate.host (sem chave) - timeseries de ~90 dias
     try:
         end = datetime.utcnow().date()
         start = end - timedelta(days=180)
@@ -221,22 +191,18 @@ def get_spy(period="6mo", interval="1d") -> pd.DataFrame:
 
 @st.cache_data(ttl=30*60, show_spinner=False)
 def get_ibov(period="6mo", interval="1d") -> pd.DataFrame:
-    # 1) yfinance índice IBOV
     df = yf_download("^BVSP", period=period, interval=interval)
     if not df.empty and len(df) >= 5:
         return df[["Close"]].copy()
 
-    # 2) BOVA11 como proxy (yfinance)
     df2 = yf_download("BOVA11.SA", period=period, interval=interval)
     if not df2.empty and len(df2) >= 5:
         df2 = df2[["Close"]].copy()
         df2.rename(columns={"Close": "Close (BOVA11 proxy)"}, inplace=True)
         return df2
 
-    # 3) brapi (diário). Muitos planos não suportam intraday/6m.
     token = os.environ.get("BRAPI_TOKEN")
     try:
-        # Tenta range fixo diário (6 meses)
         url = "https://brapi.dev/api/quote/IBOV"
         params = {"range": "6mo", "interval": "1d"}
         headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -246,11 +212,9 @@ def get_ibov(period="6mo", interval="1d") -> pd.DataFrame:
         if results and "historicalDataPrice" in results[0]:
             hist = results[0]["historicalDataPrice"]
             df = pd.DataFrame(hist)
-            # brapi retorna timestamp (s) e adjClose/close
             if "date" in df.columns:
                 df["Date"] = pd.to_datetime(df["date"], unit="s")
                 df = df.set_index("Date")
-            # escolhe 'close' preferencialmente
             close_col = "close" if "close" in df.columns else "adjClose"
             if close_col in df.columns:
                 out = df.rename(columns={close_col: "Close"})[["Close"]].dropna()
@@ -296,11 +260,8 @@ def render_chart(title: str, df: pd.DataFrame, unit: str = ""):
     if df is None or df.empty:
         st.error("Sem dados disponíveis no momento.")
         return
-    # Info
     st.caption(f"Registros: {len(df)} • {df.index.min().date()} → {df.index.max().date()}")
-    # Chart
     st.line_chart(df["Close"])
-    # Last value
     last = df["Close"].iloc[-1]
     st.metric("Último", f"{last:,.2f}{unit}".replace(",", "X").replace(".", ",").replace("X", "."))
 
@@ -312,7 +273,6 @@ def main():
     st.title("📈 Dashboard — Liga Bauru")
     st.caption("USD/BRL, IBOV, SPY e BTC com fallbacks e timeouts.")
 
-    # Sidebar controls
     st.sidebar.header("Parâmetros")
     period = st.sidebar.selectbox(
         "Período",
@@ -323,11 +283,10 @@ def main():
         "Intervalo",
         ["1d", "1wk", "1mo", "30m", "15m"],
         index=0,
-        help="Intraday (15m/30m) só funciona com janela curta (~30-60 dias).",
+        help="Intraday (15m/30m) só funciona com janela curta (~30-60 dias)."
     )
     period, interval = safe_combo(period, interval)
 
-    # Optional refresh
     try:
         from streamlit_autorefresh import st_autorefresh
         refresh_minutes = st.sidebar.slider("Auto atualizar (min)", 0, 60, 0, help="0 = desativado")
@@ -387,25 +346,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
-
-req_txt = r"""
-streamlit>=1.34
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-yfinance>=0.2.40
-streamlit-autorefresh>=1.0
-python-dateutil>=2.9
-"""
-
-readme = r"""
-# Dashboard Liga Bauru — Streamlit
-
-App com USD/BRL, IBOV (fallback BOVA11 / brapi), SPY e BTC (com cadeia de fallbacks), além de notícias via NewsAPI.
-
-## Deploy no Streamlit Community Cloud
-
-1. Suba estes arquivos para um repositório público no GitHub.
-2. No Streamlit Cloud, aponte o **Main file path** para `app.py` e selecione **Python 3.11**.
-3. Em **App settings → Secrets**, defina (quando tiver):
