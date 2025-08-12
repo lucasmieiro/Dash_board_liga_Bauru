@@ -625,3 +625,4 @@ st.caption(
     f"Yahoo Chart / yfinance / Stooq (.com/.pl) / brapi (diário 1mo/3mo) / proxy BOVA11 (normalizado) — IBOV, "
     f"FMP (Heatmap), TradingEconomics (agenda), NewsAPI + RSS (manchetes)."
 )
+
